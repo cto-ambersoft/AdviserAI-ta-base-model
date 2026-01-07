@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-tech"
+version = "0.1.0"
+description = "Binance 4h OHLCV -> TA features -> CatBoost multiclass BUY/SELL/HOLD signal."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Alex" }]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pyarrow>=17.0",
+  "requests>=2.32",
+  "python-dateutil>=2.9",
+  "pydantic>=2.8",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.30",
+  "typer>=0.12",
+  "rich>=13.8",
+  "scikit-learn>=1.5",
+  "catboost>=1.2.7",
+  "ta>=0.11.0",
+  "optuna>=3.6",
+  "binance-connector>=3.6.0",
+]
+
+[project.scripts]
+model-tech = "model_tech.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
