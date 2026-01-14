@@ -26,6 +26,7 @@ dependencies = [
   "ta>=0.11.0",
   "optuna>=3.6",
   "binance-connector>=3.6.0",
+  "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git",
 ]
 
 [project.scripts]

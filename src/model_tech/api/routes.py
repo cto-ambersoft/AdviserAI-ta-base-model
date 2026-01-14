@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from model_tech.api.jobs import TrainJobQueue
-from model_tech.api.schemas import HealthResponse, JobStatusResponse, PredictResponse
+from model_tech.api.schemas import GapInfoResponse, HealthResponse, JobStatusResponse, PredictResponse
 from model_tech.artifacts import artifacts_ready
 from model_tech.config import DataConfig, LabelingConfig, ModelConfig, Paths, TuneConfig
 from model_tech.data.symbols import normalize_symbol
 from model_tech.data.update import ensure_symbol_ohlcv
+from model_tech.gap_info import GapInfoDependencyError, GapInfoUpstreamError, build_gap_info
 from model_tech.infer import ArtifactsStore, predict_signal
 from model_tech.train import train_symbol_pipeline
 
@@ -88,6 +90,25 @@ def train_status(symbol: str, q: TrainJobQueue = Depends(get_job_queue)) -> JobS
         error=rec.error,
         result=rec.result,
     )
+
+
+@router.get("/gap-info", response_model=GapInfoResponse)
+async def gap_info() -> GapInfoResponse:
+    """
+    Independent endpoint: loads CME BTC history, BTC.D/USDT.D dominance,
+    computes market regime and detects CME gaps (ported from gap_detector_v2.py).
+    """
+    try:
+        payload = await run_in_threadpool(
+            build_gap_info,
+        )
+        return payload  # FastAPI will validate/serialize via response_model
+    except GapInfoDependencyError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except GapInfoUpstreamError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/predict", response_model=PredictResponse)

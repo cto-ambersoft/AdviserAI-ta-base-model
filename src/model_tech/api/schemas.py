@@ -33,3 +33,60 @@ class JobStatusResponse(BaseModel):
     result: Optional[dict] = None
 
 
+class GapInfoMeta(BaseModel):
+    interval: str
+    price_bars_requested: int
+    price_bars_returned: int
+    dominance_bars_requested: int
+    dominance_bars_returned: int
+    min_gap_size: float
+
+
+class GapInfoMarketRegimeCurrent(BaseModel):
+    timestamp: str
+    btc_d: float
+    usdt_d: float
+    btc_d_trend: Optional[float] = None
+    usdt_d_trend: Optional[float] = None
+    market_regime: str
+
+
+class GapInfoGap(BaseModel):
+    gap_type: str
+    direction: str
+    status: str
+    created_at: str
+    initial_low: float
+    initial_high: float
+    current_low: float
+    current_high: float
+
+
+class GapInfoOHLCVBar(BaseModel):
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class GapInfoDominanceBar(BaseModel):
+    timestamp: str
+    btc_d: float
+    usdt_d: float
+    btc_d_trend: Optional[float] = None
+    usdt_d_trend: Optional[float] = None
+    market_regime: str
+
+
+class GapInfoResponse(BaseModel):
+    meta: GapInfoMeta
+    market_regime_current: GapInfoMarketRegimeCurrent
+    open_gaps: list[GapInfoGap]
+    all_gaps: list[GapInfoGap]
+    last_price_bar: GapInfoOHLCVBar
+    price_history: Optional[list[GapInfoOHLCVBar]] = None
+    dominance_history: Optional[list[GapInfoDominanceBar]] = None
+
+

@@ -12,6 +12,7 @@ WORKDIR /app
 # Install system dependencies required for building Python packages and curl for healthchecks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

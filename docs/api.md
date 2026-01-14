@@ -50,6 +50,21 @@ curl "http://localhost:8000/v1/predict?symbol=BTCUSDT&refresh=true"
 curl "http://localhost:8000/v1/predict?symbol=DOGEUSDT&refresh=true&train=true"
 ```
 
+#### `GET /v1/gap-info`
+
+Independent endpoint (not related to the technical model): fetches CME BTC history + BTC.D/USDT.D from TradingView and returns:
+
+- current market regime (based on BTC.D/USDT.D daily deltas)
+- all detected CME gaps + open gaps
+- last BTC bar
+- price & dominance history (always included)
+
+Example:
+
+```bash
+curl "http://localhost:8000/v1/gap-info"
+```
+
 #### `GET /v1/jobs/{job_id}`
 
 Returns the current status of a training job.

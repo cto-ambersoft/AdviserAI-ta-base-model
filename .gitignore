@@ -31,6 +31,7 @@ dist/
 pip-wheel-metadata/
 
 # Local datasets / caches (Binance OHLCV)
+!src/model_tech/data/
 data/
 *.parquet
 *.csv
