@@ -28,6 +28,7 @@ class LoadedArtifacts:
     indicator_params: IndicatorParams
     lookback_needed: int
     calibration: dict | None = None
+    model_version: str = ""
 
 
 class ArtifactsStore:
@@ -67,6 +68,7 @@ class ArtifactsStore:
                 indicator_params=IndicatorParams(**schema.get("indicator_params", {})),
                 lookback_needed=int(schema.get("lookback_needed", 300)),
                 calibration=calibration,
+                model_version=str(infer.get("model_version", "")),
             )
             self._cache[key] = (arts, mt)
             return arts
@@ -190,6 +192,7 @@ def predict_signal(
         probs=probs,
         max_prob=max_prob,
         forced_hold=forced_hold,
+        model_version=arts.model_version,
     )
 
 

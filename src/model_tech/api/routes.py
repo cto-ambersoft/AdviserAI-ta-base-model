@@ -205,6 +205,7 @@ def predict(
         probs=pred.probs,
         max_prob=float(pred.max_prob),
         forced_hold=bool(pred.forced_hold),
+        model_version=str(pred.model_version),
         model_id_used=(model_id_used or "global"),
         job_id=job_id,
     )

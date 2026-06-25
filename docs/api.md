@@ -56,6 +56,7 @@ Response fields:
 - `confidence`: probability of the **emitted** class (after the `min_conf` rule)
 - `max_prob`: raw top class probability **before** the rule (so a forced HOLD's low confidence is explainable)
 - `forced_hold`: `true` when the model's argmax was not HOLD but `min_conf` downgraded it to HOLD
+- `model_version`: provenance id of the model that produced the prediction (see `manifest.json`)
 - `model_id_used`: `"global"` or `<SYMBOL>`
 - `job_id`: present if a training job was scheduled
 

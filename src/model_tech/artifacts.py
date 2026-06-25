@@ -17,6 +17,7 @@ class ArtifactPaths:
     inference_path: Path
     metrics_path: Path
     calibration_path: Path
+    manifest_path: Path
 
 
 def artifact_paths(paths: Paths, *, model_id: str | None = None) -> ArtifactPaths:
@@ -39,6 +40,7 @@ def artifact_paths(paths: Paths, *, model_id: str | None = None) -> ArtifactPath
         inference_path=d / "inference.json",
         metrics_path=d / "metrics.json",
         calibration_path=d / "calibration.json",
+        manifest_path=d / "manifest.json",
     )
 
 

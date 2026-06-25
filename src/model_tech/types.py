@@ -19,5 +19,6 @@ class Prediction:
     probs: dict[str, float]
     max_prob: float  # raw top probability before the min_conf rule
     forced_hold: bool  # True if argmax != HOLD but min_conf downgraded it to HOLD
+    model_version: str = ""  # provenance id of the model that produced this prediction
 
 

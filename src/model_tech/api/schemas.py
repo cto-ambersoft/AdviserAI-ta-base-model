@@ -19,6 +19,7 @@ class PredictResponse(BaseModel):
     probs: dict[str, float]
     max_prob: float = Field(..., description="raw top class probability before the min_conf rule")
     forced_hold: bool = Field(False, description="True if argmax was not HOLD but min_conf downgraded it")
+    model_version: str = Field("", description="provenance id of the model that produced this prediction")
 
     model_id_used: str = Field(..., description="global or SYMBOL")
     job_id: Optional[str] = Field(None, description="Training job id, if scheduled")

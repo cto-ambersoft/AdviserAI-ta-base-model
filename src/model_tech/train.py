@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +18,13 @@ from model_tech.evaluation import baseline_metrics, economic_metrics, multiclass
 from model_tech.features.indicators import IndicatorParams, build_ta_features, infer_lookback_bars
 from model_tech.labeling import compute_forward_return
 from model_tech.logging import get_logger
+from model_tech.provenance import (
+    compute_model_version,
+    dataset_fingerprint,
+    embed_provenance_metadata,
+    feature_code_hash,
+    git_commit,
+)
 from model_tech.split import leave_one_symbol_out, purge_train_times, walk_forward_splits
 
 log = get_logger(__name__)
@@ -55,7 +63,7 @@ def train_pipeline(
         raise ValueError("No symbols provided")
 
     lookback_needed = max(int(data_cfg.lookback_bars), infer_lookback_bars(ind_params))
-    df = _build_dataset(symbols=symbols, paths=paths, horizon_bars=lab_cfg.horizon_bars, lookback_needed=lookback_needed, ind_params=ind_params)
+    df, used_ohlcv = _build_dataset(symbols=symbols, paths=paths, horizon_bars=lab_cfg.horizon_bars, lookback_needed=lookback_needed, ind_params=ind_params)
     if df.empty:
         raise ValueError("No training data. Run `model-tech download ...` first.")
 
@@ -168,13 +176,35 @@ def train_pipeline(
     final = _make_model(model_cfg)
     final.fit(Pool(X_all, y_all, cat_features=cat_features), verbose=False)
 
+    # --- Provenance (model_version, training_data_hash, feature_code_hash) ---
+    created_at = datetime.now(timezone.utc).isoformat()
+    data_fp = dataset_fingerprint(used_ohlcv)
+    code_hash = feature_code_hash(asdict(ind_params))
+    model_version = compute_model_version(
+        data_fp["training_data_hash"],
+        code_hash,
+        {"theta": float(best_theta), "horizon": int(lab_cfg.horizon_bars), "symbols": symbols, "cat_features": cat_features},
+    )
+    run_id = str(uuid.uuid4())
+    # Embed into the model so the .cbm is self-describing even without the manifest.
+    embed_provenance_metadata(
+        final,
+        {
+            "model_version": model_version,
+            "run_id": run_id,
+            "training_data_hash": data_fp["training_data_hash"],
+            "feature_code_hash": code_hash,
+            "created_at_utc": created_at,
+        },
+    )
+
     # Persist artifacts
     ap = artifact_paths(paths, model_id=model_id)
     ap.model_path.parent.mkdir(parents=True, exist_ok=True)
     final.save_model(str(ap.model_path))
 
     schema = {
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "created_at_utc": created_at,
         "symbols": symbols,
         "interval": data_cfg.interval,
         "feature_cols": feature_cols,
@@ -200,6 +230,7 @@ def train_pipeline(
     write_json(
         ap.inference_path,
         {
+            "model_version": model_version,
             "min_conf": float(min_conf),
             "class_mapping": {"SELL": 0, "HOLD": 1, "BUY": 2},
             "decision_rule": "if max_prob < min_conf: HOLD else argmax",
@@ -267,9 +298,45 @@ def train_pipeline(
         },
     )
 
+    # Single provenance document (model_version + data/code hashes + windows + metrics summary).
+    write_json(
+        ap.manifest_path,
+        {
+            "model_version": model_version,
+            "run_id": run_id,
+            "created_at_utc": created_at,
+            "package_version": _package_version(),
+            "git_commit": git_commit(),
+            "model_id": (str(model_id).strip().upper() if model_id else "global"),
+            "symbols": symbols,
+            "interval": data_cfg.interval,
+            "horizon_bars": int(lab_cfg.horizon_bars),
+            "theta": float(best_theta),
+            "min_conf": float(min_conf),
+            "calibration": {
+                "method": (calibrator.get("method") if calibrator else None),
+                "brier": calibration.get("multiclass_brier"),
+            },
+            "feature_code_hash": code_hash,
+            "indicator_params": asdict(ind_params),
+            "feature_cols": feature_cols,
+            "cat_features": cat_features,
+            "training_data_hash": data_fp["training_data_hash"],
+            "data_window": data_fp["per_symbol"],
+            "n_rows": int(len(df)),
+            "n_bars": int(len(unique_times)),
+            "metrics": {
+                "test_macro_f1": macro_f1,
+                "test_balanced_accuracy": bal_acc,
+                "always_hold_macro_f1": baselines.get("always_hold_macro_f1"),
+            },
+        },
+    )
+
     return {
         "artifacts_dir": str(paths.artifacts_dir),
         "model_id": (str(model_id).strip().upper() if model_id else "global"),
+        "model_version": model_version,
         "symbols": symbols,
         "n_rows": int(len(df)),
         "n_bars": int(len(unique_times)),
@@ -286,14 +353,24 @@ def train_pipeline(
     }
 
 
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("model-tech")
+    except Exception:
+        return "0.0.0"
+
+
 def _build_dataset(
     symbols: list[str],
     paths: Paths,
     horizon_bars: int,
     lookback_needed: int,
     ind_params: IndicatorParams,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     parts: list[pd.DataFrame] = []
+    used_ohlcv: dict[str, pd.DataFrame] = {}
     for sym in symbols:
         ohlcv = read_ohlcv(paths, sym)
         if ohlcv.empty:
@@ -302,6 +379,7 @@ def _build_dataset(
             log.warning("Skipping %s: not enough bars (%d)", sym, len(ohlcv))
             continue
 
+        used_ohlcv[sym] = ohlcv  # raw OHLCV actually used -> data fingerprint
         feat = build_ta_features(ohlcv=ohlcv, symbol=sym, params=ind_params)
         feat["close"] = ohlcv.sort_values("open_time")["close"].to_numpy()
         feat["fwd_return"] = compute_forward_return(feat["close"], horizon_bars=horizon_bars)
@@ -313,11 +391,11 @@ def _build_dataset(
         parts.append(feat[["open_time", "symbol", "fwd_return", *feature_cols]].copy())
 
     if not parts:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     out = pd.concat(parts, ignore_index=True)
     out = out.sort_values("open_time").reset_index(drop=True)
-    return out
+    return out, used_ohlcv
 
 
 def _feature_columns(df: pd.DataFrame) -> list[str]:

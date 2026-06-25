@@ -66,6 +66,19 @@ The model outputs class probabilities. Decision rule:
 
 `min_conf` is tuned on the most recent validation window and saved to artifacts.
 
+## Provenance (manifest.json)
+
+Each trained model writes `manifest.json` — a single provenance document:
+
+- `model_version`: content-addressed id `v<sha256[:12]>` over (data hash + code hash + params + theta)
+- `run_id`: unique id per training run
+- `training_data_hash`: deterministic SHA256 of the OHLCV used (per-symbol windows in `data_window`)
+- `feature_code_hash`: SHA256 of the feature-computation source + indicator params (stable without `.git`)
+- `created_at_utc`, `package_version`, `git_commit` (best-effort), `theta`, `min_conf`, `calibration`, metrics summary
+
+`model_version`, `training_data_hash`, `feature_code_hash` and `created_at_utc` are also embedded in the
+`.cbm` metadata, so the model file is self-describing. `/v1/predict` returns `model_version`.
+
 ## Honest evaluation (metrics.json)
 
 Beyond classification macro-F1, training also reports on the most recent test fold:
