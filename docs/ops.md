@@ -38,6 +38,14 @@ Notes:
 - Auto-train uses the same in-memory `TrainJobQueue`; with `uvicorn --workers > 1` each worker schedules its own jobs.
 - For latency-sensitive deployments, reduce workers/threads or disable auto-train and run training out-of-band.
 
+### gap-info cache
+
+`GET /v1/gap-info` fetches ~3200 bars from TradingView (heavy, rate-limited), so the
+payload is cached in-process:
+
+- **MODEL_TECH_GAPINFO_TTL_SECONDS**: cache TTL in seconds (default `3600`; `0` disables).
+- Concurrent callers are single-flighted (only one upstream fetch at a time).
+
 ### Artifacts layout
 
 - Global model (fallback): `artifacts/`
@@ -58,6 +66,20 @@ Notes:
 - CatBoost training config supports:
   - `ModelConfig.thread_count` (CPU threads)
   - `ModelConfig.task_type` (`CPU` or `GPU`)
+  - `ModelConfig.auto_class_weights` (`Balanced` by default; up-weights minority BUY/SELL)
+
+### Training knobs (fairness / honesty)
+
+- `TrainConfig.use_symbol_feature` (default `False`): include `symbol` as a categorical feature.
+  Kept off so the model is shape-based and the global fallback generalizes to coins it never trained on.
+- `TrainConfig.loso_eval` (default `False`, multi-symbol only): run leave-one-symbol-out
+  cross-validation and report per-held-out-symbol macro-F1 (written to `metrics.json` under `loso`).
+  Reporting-only — it does not change the shipped model, but it costs one extra model fit per symbol.
+- `TrainConfig.calibration` (default `None`; `"sigmoid"` | `"isotonic"`): fit a probability
+  calibrator on the recent validation window and save it as `artifacts/.../calibration.json`
+  (OvR per-class maps + renormalization). When set, `min_conf` is tuned on the **calibrated**
+  probabilities and inference applies the calibrator before the decision rule, so the reported
+  `confidence`/`probs` are calibrated and `min_conf` thresholds the same scale.
 
 ### References
 

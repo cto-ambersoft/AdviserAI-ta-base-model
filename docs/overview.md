@@ -27,7 +27,7 @@ Current v1 feature set (see `src/model_tech/features/indicators.py`):
 - volatility: `ATR14/Close`, realized vol (rolling std of log returns)
 - Bollinger: `percentB`, `width`
 - volume: `log_volume`, `vol_rel = volume / SMA(volume,30)`
-- optional: `CMF(20)`, `OBV`
+- `CMF(20)`, `obv_z` (OBV normalized to a rolling z-score — raw OBV is a cumulative total whose level depends on the window start, so it is not leakage/train-serve safe)
 
 Additionally, `symbol` is passed as a **categorical** feature to allow training a single multi-asset model.
 
@@ -65,6 +65,27 @@ The model outputs class probabilities. Decision rule:
 - else `argmax(prob)`
 
 `min_conf` is tuned on the most recent validation window and saved to artifacts.
+
+## Honest evaluation (metrics.json)
+
+Beyond classification macro-F1, training also reports on the most recent test fold:
+
+- **economics**: return of acting on signals (BUY=+r, SELL=−r, HOLD=0 over the horizon),
+  `directional_accuracy`, `n_trades`, `trade_rate`. Note: horizon labels overlap, so
+  `strategy_total_return` overstates a tradable PnL — compare per-bar means, which use the
+  same convention as the baseline.
+- **baselines**: `buy_and_hold_mean_return_per_bar`, `always_hold_return`, `always_hold_macro_f1`
+  (so a macro-F1 ≈ 0.4 can be judged against doing nothing).
+- **calibration**: `multiclass_brier` (probability quality; the `min_conf` threshold relies on it).
+- **loso** (multi-symbol, opt-in): leave-one-symbol-out macro-F1 per held-out coin.
+
+### Probability calibration (optional)
+
+`TrainConfig.calibration = "sigmoid" | "isotonic"` fits a per-class calibrator (OvR +
+renormalization, same scheme as sklearn `CalibratedClassifierCV`) on the recent validation
+window and saves it as `calibration.json`. Inference applies it to the raw model probabilities
+before the decision rule, and `min_conf` is tuned on the calibrated scale — so the emitted
+`confidence`/`probs` are trustworthy. Off by default (one extra validation-window fit).
 
 
 ### 1. Как работает сервис (Core Logic)

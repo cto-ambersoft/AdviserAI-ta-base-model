@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from model_tech.config import Paths
+from model_tech.data.symbols import validate_symbol
 
 
 def ensure_dirs(paths: Paths) -> None:
@@ -14,7 +15,7 @@ def ensure_dirs(paths: Paths) -> None:
 
 
 def symbol_ohlcv_path(paths: Paths, symbol: str) -> Path:
-    return paths.data_dir / f"{symbol.upper()}_4h.parquet"
+    return paths.data_dir / f"{validate_symbol(symbol)}_4h.parquet"
 
 
 def read_ohlcv(paths: Paths, symbol: str) -> pd.DataFrame:

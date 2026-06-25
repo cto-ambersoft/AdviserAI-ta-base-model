@@ -10,12 +10,14 @@ from catboost import CatBoostClassifier, Pool
 from sklearn.metrics import balanced_accuracy_score, classification_report, f1_score
 
 from model_tech.artifacts import artifact_paths, write_json
+from model_tech.calibration import apply_calibration, fit_calibration
 from model_tech.config import DataConfig, LabelingConfig, ModelConfig, Paths, TrainConfig, TuneConfig
 from model_tech.data.store import read_ohlcv
+from model_tech.evaluation import baseline_metrics, economic_metrics, multiclass_brier_score
 from model_tech.features.indicators import IndicatorParams, build_ta_features, infer_lookback_bars
 from model_tech.labeling import compute_forward_return
 from model_tech.logging import get_logger
-from model_tech.split import walk_forward_splits
+from model_tech.split import leave_one_symbol_out, purge_train_times, walk_forward_splits
 
 log = get_logger(__name__)
 
@@ -58,7 +60,9 @@ def train_pipeline(
         raise ValueError("No training data. Run `model-tech download ...` first.")
 
     feature_cols = _feature_columns(df)
-    cat_features = ["symbol"]
+    # `symbol` is opt-in: by default models are shape-based and generalize to
+    # symbols they were never trained on (see TrainConfig.use_symbol_feature).
+    cat_features = ["symbol"] if getattr(tr_cfg, "use_symbol_feature", False) else []
 
     # Time axis is unique open_time bars; folds are in bars, not rows.
     unique_times = np.array(sorted(df["open_time"].unique()))
@@ -88,8 +92,9 @@ def train_pipeline(
     best = None
     cv_rows: list[dict[str, Any]] = []
 
-    # Lighter model during theta search (CV) to reduce runtime.
-    tune_iterations = int(min(int(model_cfg.iterations), int(tune_cfg.tune_iterations)))
+    # theta CV uses the SAME model capacity as the final model (search cost is
+    # bounded by the small theta-candidate set + early stopping, not by cutting
+    # iterations), so the selected theta matches the model we actually ship.
     for theta in theta_candidates:
         y = _labels_from_fwd_return(df["fwd_return"].to_numpy(), theta=float(theta))
         hold_share = float(np.mean(y == 1))
@@ -104,7 +109,7 @@ def train_pipeline(
             X_val = df.loc[val_mask, feature_cols + cat_features]
             y_val = y[val_mask]
 
-            model = _make_model(model_cfg, iterations_override=tune_iterations)
+            model = _make_model(model_cfg)
             model.fit(
                 Pool(X_train, y_train, cat_features=cat_features),
                 eval_set=Pool(X_val, y_val, cat_features=cat_features),
@@ -129,8 +134,10 @@ def train_pipeline(
     best_theta = float(best["theta"])
     log.info("Chosen theta=%.5f (cv val macro-F1=%.4f, hold_share=%.3f)", best_theta, best["val_macro_f1"], best["hold_share"])
 
-    # Tune min_conf on most recent validation window (cheap: no re-train per candidate).
-    min_conf = _tune_min_conf_recent_val(
+    # Recent validation window (model trained on purged-train) -> probabilities.
+    # Used to (optionally) fit a calibrator and then tune min_conf. Tuning on the
+    # CALIBRATED probabilities keeps the threshold consistent with inference.
+    rv = _recent_val_probs(
         df=df,
         unique_times=unique_times,
         theta=best_theta,
@@ -139,9 +146,21 @@ def train_pipeline(
         model_cfg=model_cfg,
         val_bars=tr_cfg.val_bars,
         min_train_bars=tr_cfg.min_train_bars,
-        hold_share_min=lab_cfg.hold_share_min,
-        hold_share_max=lab_cfg.hold_share_max,
+        horizon_bars=lab_cfg.horizon_bars,
     )
+    calibrator: dict[str, Any] | None = None
+    if rv is None:
+        min_conf = 0.45
+    else:
+        y_val, prob_val = rv
+        method = getattr(tr_cfg, "calibration", None)
+        if method:
+            calibrator = fit_calibration(prob_val, y_val, method=str(method), n_classes=int(prob_val.shape[1]))
+            prob_val = apply_calibration(prob_val, calibrator)
+            log.info("Fitted %s calibration on recent val window", method)
+        min_conf = _tune_min_conf_from_probs(
+            y_val, prob_val, lab_cfg.hold_share_min, lab_cfg.hold_share_max
+        )
 
     # Train final model on all labeled rows.
     y_all = _labels_from_fwd_return(df["fwd_return"].to_numpy(), theta=best_theta)
@@ -184,20 +203,33 @@ def train_pipeline(
             "min_conf": float(min_conf),
             "class_mapping": {"SELL": 0, "HOLD": 1, "BUY": 2},
             "decision_rule": "if max_prob < min_conf: HOLD else argmax",
+            "calibrated": bool(calibrator is not None),
         },
     )
-    write_json(
-        ap.metrics_path,
-        {
-            "best_theta": best,
-            "cv": cv_rows,
-            "min_conf": float(min_conf),
-        },
-    )
+    # Probability calibrator (applied to raw probs at inference, before the rule).
+    if calibrator is not None:
+        write_json(ap.calibration_path, calibrator)
 
-    # Quick honest metrics on the most recent test fold (train+val -> test)
+    # Optional leave-one-symbol-out generalization report (multi-symbol only).
+    loso: dict[str, Any] = {}
+    if getattr(tr_cfg, "loso_eval", False) and len(symbols) >= 2:
+        loso = evaluate_loso(
+            df,
+            feature_cols=feature_cols,
+            cat_features=cat_features,
+            theta=best_theta,
+            model_cfg=model_cfg,
+        )
+        if loso:
+            macro = [v["macro_f1"] for v in loso.values()]
+            log.info("LOSO macro-F1 by held-out symbol: %s (mean=%.4f)", {k: round(v["macro_f1"], 4) for k, v in loso.items()}, float(np.mean(macro)))
+
+    # Quick honest metrics on the most recent test fold (train+val -> test).
+    # Purge the last `horizon` bars before test: their labels (forward return
+    # over horizon bars) reach into the test window and would inflate metrics.
     last_fold = folds[-1]
     train_val_idx = np.concatenate([last_fold.train_idx, last_fold.val_idx])
+    train_val_idx = purge_train_times(train_val_idx, lab_cfg.horizon_bars)
     train_val_mask = _time_mask(df["open_time"].to_numpy(), unique_times, train_val_idx)
     test_mask = _time_mask(df["open_time"].to_numpy(), unique_times, last_fold.test_idx)
 
@@ -213,6 +245,28 @@ def train_pipeline(
     macro_f1 = float(f1_score(y_test, pred, average="macro"))
     bal_acc = float(balanced_accuracy_score(y_test, pred))
 
+    # Honest assessment beyond F1: does acting on signals pay vs naive baselines,
+    # and are the probabilities (that min_conf trusts) well-calibrated?
+    fwd_test = df.loc[test_mask, "fwd_return"].to_numpy()
+    economics = economic_metrics(pred, fwd_test)
+    baselines = baseline_metrics(y_test, fwd_test)
+    calibration = {"multiclass_brier": multiclass_brier_score(prob, y_test, n_classes=int(prob.shape[1]))}
+
+    write_json(
+        ap.metrics_path,
+        {
+            "best_theta": best,
+            "cv": cv_rows,
+            "min_conf": float(min_conf),
+            "loso": loso,
+            "test_macro_f1": macro_f1,
+            "test_balanced_accuracy": bal_acc,
+            "economics": economics,
+            "baselines": baselines,
+            "calibration": calibration,
+        },
+    )
+
     return {
         "artifacts_dir": str(paths.artifacts_dir),
         "model_id": (str(model_id).strip().upper() if model_id else "global"),
@@ -221,9 +275,14 @@ def train_pipeline(
         "n_bars": int(len(unique_times)),
         "theta": float(best_theta),
         "min_conf": float(min_conf),
+        "calibration_method": (calibrator.get("method") if calibrator else None),
         "test_macro_f1": macro_f1,
         "test_balanced_accuracy": bal_acc,
         "test_report": classification_report(y_test, pred, digits=4),
+        "loso": loso,
+        "economics": economics,
+        "baselines": baselines,
+        "calibration": calibration,
     }
 
 
@@ -272,10 +331,9 @@ def _labels_from_fwd_return(fwd: np.ndarray, theta: float) -> np.ndarray:
     return y
 
 
-def _make_model(cfg: ModelConfig, iterations_override: int | None = None) -> CatBoostClassifier:
-    iterations = int(iterations_override) if iterations_override is not None else int(cfg.iterations)
-    return CatBoostClassifier(
-        iterations=iterations,
+def _make_model(cfg: ModelConfig) -> CatBoostClassifier:
+    params: dict[str, Any] = dict(
+        iterations=int(cfg.iterations),
         learning_rate=cfg.learning_rate,
         depth=cfg.depth,
         l2_leaf_reg=cfg.l2_leaf_reg,
@@ -289,6 +347,11 @@ def _make_model(cfg: ModelConfig, iterations_override: int | None = None) -> Cat
         od_wait=200,
         use_best_model=False,
     )
+    # Only set when enabled so it does not appear on the model when disabled.
+    acw = getattr(cfg, "auto_class_weights", None)
+    if acw:
+        params["auto_class_weights"] = acw
+    return CatBoostClassifier(**params)
 
 
 def _time_mask(open_time: np.ndarray, unique_times: np.ndarray, time_idx: np.ndarray) -> np.ndarray:
@@ -299,7 +362,7 @@ def _time_masks(open_time: np.ndarray, unique_times: np.ndarray, train_idx: np.n
     return _time_mask(open_time, unique_times, train_idx), _time_mask(open_time, unique_times, val_idx)
 
 
-def _tune_min_conf_recent_val(
+def _recent_val_probs(
     df: pd.DataFrame,
     unique_times: np.ndarray,
     theta: float,
@@ -308,32 +371,43 @@ def _tune_min_conf_recent_val(
     model_cfg: ModelConfig,
     val_bars: int,
     min_train_bars: int,
-    hold_share_min: float,
-    hold_share_max: float,
-) -> float:
-    if len(unique_times) < (min_train_bars + val_bars):
-        return 0.45
+    horizon_bars: int = 0,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Train on the purged training window and return (y_val, prob_val) on the most
+    recent validation window, or None if there isn't enough data. Shared by
+    min_conf tuning and calibration so we only fit one model.
+    """
+    if len(unique_times) < (min_train_bars + val_bars + horizon_bars):
+        return None
 
     val_times = unique_times[-val_bars:]
-    train_times = unique_times[: -val_bars]
+    # Purge the last `horizon` train bars: their labels look into the val window.
+    train_times = purge_train_times(unique_times[:-val_bars], horizon_bars)
     train_mask = df["open_time"].isin(train_times).to_numpy()
     val_mask = df["open_time"].isin(val_times).to_numpy()
 
     y = _labels_from_fwd_return(df["fwd_return"].to_numpy(), theta=theta)
-
     X_train = df.loc[train_mask, feature_cols + cat_features]
-    y_train = y[train_mask]
     X_val = df.loc[val_mask, feature_cols + cat_features]
-    y_val = y[val_mask]
 
     model = _make_model(model_cfg)
     model.fit(
-        Pool(X_train, y_train, cat_features=cat_features),
-        eval_set=Pool(X_val, y_val, cat_features=cat_features),
+        Pool(X_train, y[train_mask], cat_features=cat_features),
+        eval_set=Pool(X_val, y[val_mask], cat_features=cat_features),
         use_best_model=True,
         verbose=False,
     )
     prob = model.predict_proba(Pool(X_val, cat_features=cat_features))
+    return y[val_mask], np.asarray(prob, dtype=float)
+
+
+def _tune_min_conf_from_probs(
+    y_val: np.ndarray,
+    prob: np.ndarray,
+    hold_share_min: float,
+    hold_share_max: float,
+) -> float:
     argmax = np.argmax(prob, axis=1).astype(int)
     maxp = np.max(prob, axis=1)
 
@@ -413,6 +487,53 @@ def _theta_candidates(
         idx = np.linspace(0, len(out) - 1, num=n_candidates).round().astype(int)
         out = [out[i] for i in idx]
     return out
+
+
+def evaluate_loso(
+    df: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    cat_features: list[str],
+    theta: float,
+    model_cfg: ModelConfig,
+) -> dict[str, dict[str, Any]]:
+    """
+    Leave-one-symbol-out generalization report (reporting only).
+
+    For each held-out symbol: train on all other symbols' rows and evaluate on
+    the held-out symbol. Answers "does the model generalize to a coin it never
+    saw?" — the global-fallback scenario. The held-out symbol is fully excluded
+    from training, so there is no per-symbol leakage (cross-asset correlation is
+    inherent and accepted). Returns {} when fewer than two symbols are present.
+    """
+    symbols = list(df["symbol"].astype(str))
+    folds = leave_one_symbol_out(symbols)
+    if not folds:
+        return {}
+
+    y_all = _labels_from_fwd_return(df["fwd_return"].to_numpy(), theta=float(theta))
+    sym_arr = df["symbol"].astype(str).to_numpy()
+    cols = feature_cols + cat_features
+
+    results: dict[str, dict[str, Any]] = {}
+    for others, held in folds:
+        train_mask = np.isin(sym_arr, others)
+        test_mask = sym_arr == held
+        if not train_mask.any() or not test_mask.any():
+            continue
+
+        model = _make_model(model_cfg)
+        model.fit(Pool(df.loc[train_mask, cols], y_all[train_mask], cat_features=cat_features), verbose=False)
+        prob = model.predict_proba(Pool(df.loc[test_mask, cols], cat_features=cat_features))
+        pred = np.argmax(prob, axis=1).astype(int)
+        y_true = y_all[test_mask]
+        results[held] = {
+            "macro_f1": float(f1_score(y_true, pred, average="macro")),
+            "balanced_accuracy": float(balanced_accuracy_score(y_true, pred)),
+            "n_test": int(test_mask.sum()),
+            "trained_on": list(others),
+        }
+    return results
 
 
 def train_symbol_pipeline(

@@ -1,44 +1,61 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# Set environment variables to optimize Python execution in Docker
+# Keep Python/pip lean and deterministic in containers
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    MODEL_TECH_HOME=/app
+    PIP_NO_CACHE_DIR=1
 
-# Set the working directory
 WORKDIR /app
 
-# Install system dependencies required for building Python packages and curl for healthchecks
+# Build-time deps:
+# - build-essential: compile wheels when needed
+# - git: required because pyproject depends on tvdatafeed via git URL
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only the files needed for installation first to leverage caching
 COPY pyproject.toml README.md ./
-
-# Copy the source code
 COPY src/ ./src/
 
-# Install the package and its dependencies
-RUN pip install --upgrade pip && \
-    pip install .
+# Install the package into an isolated venv we can copy to runtime.
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install -U pip && \
+    /opt/venv/bin/pip install .
 
-# Create directories for data and artifacts
-RUN mkdir -p data artifacts
 
-# Create a non-root user for security
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MODEL_TECH_HOME=/app \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Runtime deps:
+# - curl: used by docker-compose healthcheck (and optional debugging)
+# - libgomp1: OpenMP runtime commonly needed by CatBoost wheels
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Create a non-root user and required writable dirs.
 RUN adduser --disabled-password --gecos "" appuser && \
+    mkdir -p /app/data /app/artifacts && \
     chown -R appuser:appuser /app
 
-# Switch to the non-root user
 USER appuser
 
-# Expose the port the application runs on
 EXPOSE 8000
 
-# Define the command to run the application
-CMD ["model-tech", "serve", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD curl -f "http://localhost:8000/v1/health" || exit 1
+
+CMD ["model-tech", "serve", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
 

@@ -29,6 +29,12 @@ dependencies = [
   "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "httpx>=0.27",  # FastAPI TestClient
+]
+
 [project.scripts]
 model-tech = "model_tech.cli:app"
 
@@ -37,5 +43,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 

@@ -13,6 +13,43 @@ class Fold:
     test_idx: np.ndarray
 
 
+def leave_one_symbol_out(symbols: list[str]) -> list[tuple[list[str], str]]:
+    """
+    Leave-one-symbol-out folds (sklearn ``LeaveOneGroupOut`` with groups=symbol).
+
+    For each distinct symbol (in first-seen order) yields ``(train_symbols,
+    held_out_symbol)`` where train_symbols is every other symbol. Returns an
+    empty list when there are fewer than two distinct symbols (LOSO needs at
+    least one symbol to train on and one to hold out).
+    """
+    distinct: list[str] = []
+    for s in symbols:
+        if s not in distinct:
+            distinct.append(s)
+    if len(distinct) < 2:
+        return []
+    return [([o for o in distinct if o != held], held) for held in distinct]
+
+
+def purge_train_times(times: np.ndarray, horizon: int) -> np.ndarray:
+    """
+    Drop the last `horizon` bars from a time-sorted training window.
+
+    Labels are the forward return over `horizon` bars, so the final `horizon`
+    training bars carry information about closes inside the subsequent held-out
+    window (validation/test). Removing them prevents look-ahead leakage — the
+    same role as scikit-learn's ``TimeSeriesSplit(gap=...)``.
+
+    Operates positionally on the tail and never mutates the input.
+    """
+    times = np.asarray(times)
+    if horizon <= 0 or times.size == 0:
+        return times
+    if horizon >= times.size:
+        return times[:0]
+    return times[:-horizon]
+
+
 def walk_forward_splits(
     n_samples: int,
     n_folds: int,

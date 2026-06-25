@@ -23,6 +23,7 @@ class IndicatorParams:
     bb_dev: float = 2.0
     vol_sma_window: int = 30
     realized_vol_window: int = 48  # 8 days for 4h bars
+    obv_z_window: int = 50  # window for rolling z-score normalization of OBV
 
 
 def build_ta_features(
@@ -93,9 +94,19 @@ def build_ta_features(
     vol_sma = volume.rolling(params.vol_sma_window).mean()
     df["vol_rel"] = volume / vol_sma.replace(0, np.nan)
 
-    # Optional: both CMF and OBV are cheap; keep both for now (model can ignore).
+    # CMF is already windowed/relative.
     df["cmf_20"] = ChaikinMoneyFlowIndicator(high=high, low=low, close=close, volume=volume, window=20).chaikin_money_flow()
-    df["obv"] = OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+
+    # OBV is a *cumulative* running total, so its absolute level depends on how
+    # far back the input window starts. Computed on the full history at training
+    # time but on only the last `lookback` candles at inference time, the raw
+    # value is wildly different (train/serve skew). Normalize to a rolling
+    # z-score: subtracting a rolling mean removes the window-dependent level,
+    # which makes the feature invariant to the window start (the offset cancels).
+    obv = OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+    obv_mean = obv.rolling(params.obv_z_window).mean()
+    obv_std = obv.rolling(params.obv_z_window).std()
+    df["obv_z"] = (obv - obv_mean) / obv_std.replace(0, np.nan)
 
     # Keep only relevant columns
     feature_cols = [
@@ -112,7 +123,7 @@ def build_ta_features(
         "log_volume",
         "vol_rel",
         "cmf_20",
-        "obv",
+        "obv_z",
     ]
 
     out = df[["open_time", "symbol", *feature_cols]].copy()
@@ -135,6 +146,7 @@ def infer_lookback_bars(params: IndicatorParams | None = None) -> int:
             params.atr_window + 1,
             params.adx_window + 1,
             params.rsi_window + 1,
+            params.obv_z_window + 1,
             params.macd_slow + params.macd_signal + 1,
         )
     )

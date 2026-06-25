@@ -13,6 +13,48 @@ from model_tech.logging import get_logger
 log = get_logger(__name__)
 
 
+def _interval_to_hours(interval: str) -> float:
+    """
+    Parse a Binance kline interval (e.g. "4h", "1d", "15m") into hours.
+    """
+    s = (interval or "").strip().lower()
+    if not s or not s[:-1].isdigit():
+        raise ValueError(f"Unsupported interval: {interval!r}")
+    qty = float(s[:-1])
+    unit = s[-1]
+    if unit == "m":
+        return qty / 60.0
+    if unit == "h":
+        return qty
+    if unit == "d":
+        return qty * 24.0
+    if unit == "w":
+        return qty * 24.0 * 7.0
+    raise ValueError(f"Unsupported interval: {interval!r}")
+
+
+def drop_unclosed_candle(df: pd.DataFrame, interval: str, *, now: datetime | None = None) -> pd.DataFrame:
+    """
+    Drop the trailing candle while it is still forming (not yet closed).
+
+    Binance klines includes the current in-progress interval. A 4h candle with
+    open_time T is closed only once `now >= T + interval`. Predicting on (or
+    storing) a partial bar gives noisy, intra-interval-changing features, so we
+    drop it at ingestion time. Only the most recent bar can be open.
+    """
+    if df.empty:
+        return df
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    hours = _interval_to_hours(interval)
+    last_open = df["open_time"].max()
+    close_time = last_open + timedelta(hours=hours)
+    if now < close_time:
+        return df[df["open_time"] < last_open].reset_index(drop=True)
+    return df.reset_index(drop=True)
+
+
 def ensure_symbol_ohlcv(
     symbol: str,
     *,
@@ -102,6 +144,10 @@ def update_symbol_ohlcv(symbol: str, start_date: date, data_cfg: DataConfig, pat
         return existing
 
     new_df = pd.concat(all_rows, ignore_index=True)
+    # Never persist the still-forming candle (partial OHLCV → noisy features).
+    new_df = drop_unclosed_candle(new_df, data_cfg.interval)
+    if new_df.empty:
+        return existing
     out = upsert_ohlcv(paths, symbol, new_df)
     _validate_no_large_gaps(out, expected_hours=4)
     return out

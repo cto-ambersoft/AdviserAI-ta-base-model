@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 import numpy as np
@@ -9,6 +10,7 @@ import pandas as pd
 from catboost import CatBoostClassifier, Pool
 
 from model_tech.artifacts import artifact_paths, read_json
+from model_tech.calibration import apply_calibration
 from model_tech.config import DataConfig, Paths
 from model_tech.data.update import ensure_symbol_ohlcv
 from model_tech.data.store import read_ohlcv
@@ -25,6 +27,7 @@ class LoadedArtifacts:
     min_conf: float
     indicator_params: IndicatorParams
     lookback_needed: int
+    calibration: dict | None = None
 
 
 class ArtifactsStore:
@@ -34,32 +37,39 @@ class ArtifactsStore:
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, Optional[str]], tuple[LoadedArtifacts, float]] = {}
+        # FastAPI serves sync endpoints from a threadpool; guard the cache so the
+        # model is loaded once under concurrent /v1/predict instead of racing.
+        self._lock = Lock()
 
     def get(self, paths: Paths, *, model_id: str | None = None, reload: bool = False) -> LoadedArtifacts:
         key = (str(paths.artifacts_dir), model_id)
         ap = artifact_paths(paths, model_id=model_id)
 
         # Use latest mtime across relevant files as cache key.
-        mt = _latest_mtime([ap.model_path, ap.feature_schema_path, ap.inference_path])
-        cached = self._cache.get(key)
-        if cached is not None and (not reload) and cached[1] >= mt:
-            return cached[0]
+        mt = _latest_mtime([ap.model_path, ap.feature_schema_path, ap.inference_path, ap.calibration_path])
 
-        schema = read_json(ap.feature_schema_path)
-        infer = read_json(ap.inference_path)
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None and (not reload) and cached[1] >= mt:
+                return cached[0]
 
-        model = CatBoostClassifier()
-        model.load_model(str(ap.model_path))
-        arts = LoadedArtifacts(
-            model=model,
-            feature_cols=list(schema["feature_cols"]),
-            cat_features=list(schema.get("cat_features", ["symbol"])),
-            min_conf=float(infer["min_conf"]),
-            indicator_params=IndicatorParams(**schema.get("indicator_params", {})),
-            lookback_needed=int(schema.get("lookback_needed", 300)),
-        )
-        self._cache[key] = (arts, mt)
-        return arts
+            schema = read_json(ap.feature_schema_path)
+            infer = read_json(ap.inference_path)
+            calibration = read_json(ap.calibration_path) if ap.calibration_path.exists() else None
+
+            model = CatBoostClassifier()
+            model.load_model(str(ap.model_path))
+            arts = LoadedArtifacts(
+                model=model,
+                feature_cols=list(schema["feature_cols"]),
+                cat_features=list(schema.get("cat_features", ["symbol"])),
+                min_conf=float(infer["min_conf"]),
+                indicator_params=IndicatorParams(**schema.get("indicator_params", {})),
+                lookback_needed=int(schema.get("lookback_needed", 300)),
+                calibration=calibration,
+            )
+            self._cache[key] = (arts, mt)
+            return arts
 
 
 def _latest_mtime(paths: list[Path]) -> float:
@@ -74,6 +84,32 @@ def _latest_mtime(paths: list[Path]) -> float:
 
 
 _GLOBAL_ARTIFACTS = ArtifactsStore()
+
+
+def decide_signal(prob, min_conf: float) -> tuple[Signal, float, float, bool]:
+    """
+    Apply the decision rule to class probabilities [P(SELL), P(HOLD), P(BUY)].
+
+    Rule: emit argmax unless its probability is below `min_conf`, in which case
+    fall back to HOLD.
+
+    Returns ``(signal, confidence, max_prob, forced_hold)`` where:
+      - confidence is P(emitted class) — what we actually output;
+      - max_prob is the raw top probability before the rule (so a forced HOLD's
+        low confidence is explainable);
+      - forced_hold is True only when the model's argmax was not HOLD but the
+        rule downgraded it to HOLD.
+    """
+    prob = np.asarray(prob, dtype=float)
+    y_hat = int(np.argmax(prob))
+    max_prob = float(prob[y_hat])
+    forced_hold = bool(max_prob < float(min_conf) and y_hat != 1)
+    if max_prob < float(min_conf):
+        y_hat = 1  # HOLD
+    sig = y_to_signal(y_hat)
+    probs = {"SELL": float(prob[0]), "HOLD": float(prob[1]), "BUY": float(prob[2])}
+    confidence = float(probs[sig.value])
+    return sig, confidence, max_prob, forced_hold
 
 
 def predict_signal(
@@ -137,16 +173,13 @@ def predict_signal(
     X = row[arts.feature_cols + arts.cat_features]
     prob = arts.model.predict_proba(Pool(X, cat_features=arts.cat_features))[0]
     prob = np.asarray(prob, dtype=float)
+    # Apply the calibrator (if any) before the decision rule, so min_conf — tuned
+    # on calibrated probabilities at training time — thresholds the same scale.
+    if arts.calibration is not None:
+        prob = apply_calibration(prob, arts.calibration)
 
-    y_hat = int(np.argmax(prob))
-    max_prob = float(np.max(prob))
-    if max_prob < mc:
-        y_hat = 1  # HOLD
-
-    sig = y_to_signal(y_hat)
+    sig, conf, max_prob, forced_hold = decide_signal(prob, mc)
     probs = {"SELL": float(prob[0]), "HOLD": float(prob[1]), "BUY": float(prob[2])}
-    # confidence: probability of emitted class (after min_conf rule)
-    conf = float(probs[sig.value])
 
     as_of = pd.to_datetime(row["open_time"].iloc[0], utc=True).isoformat()
     return Prediction(
@@ -155,6 +188,8 @@ def predict_signal(
         signal=sig,
         confidence=conf,
         probs=probs,
+        max_prob=max_prob,
+        forced_hold=forced_hold,
     )
 
 

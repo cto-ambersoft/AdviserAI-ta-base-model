@@ -51,6 +51,19 @@ class TrainConfig:
     # - "quality": slower, more robust theta selection (still optimized vs v1)
     # - "fast": intended for online per-symbol retrain jobs
     mode: str = "quality"
+    # Whether to include `symbol` as a categorical feature.
+    # Default False: the model is purely shape-based and generalizes to unseen
+    # symbols (the global fallback model serves coins it was never trained on).
+    # For a single-symbol model `symbol` is constant and carries no signal anyway.
+    use_symbol_feature: bool = False
+    # Run leave-one-symbol-out cross-validation (multi-symbol training only) to
+    # report how well the model generalizes to a coin it never trained on.
+    # Reporting-only: does not affect the shipped model. Off by default (extra cost).
+    loso_eval: bool = False
+    # Probability calibration fitted on the recent validation window and saved as
+    # artifacts/.../calibration.json: None | "sigmoid" | "isotonic". When set,
+    # min_conf is tuned on the calibrated probabilities and inference applies it.
+    calibration: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,8 +76,6 @@ class TuneConfig:
     theta_candidates: int = 9
     # Relative multipliers around the quantile anchor theta
     theta_multipliers: tuple[float, ...] = (0.70, 0.85, 1.00, 1.15, 1.30)
-    # Use a lighter model during theta CV to reduce runtime
-    tune_iterations: int = 400
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,10 @@ class ModelConfig:
     random_seed: int = 42
     loss_function: str = "MultiClass"
     eval_metric: str = "TotalF1"
+    # Class-imbalance handling. CatBoost: None | "Balanced" | "SqrtBalanced".
+    # "Balanced" up-weights minority BUY/SELL classes so the model does not
+    # collapse toward the majority HOLD class (better minority recall).
+    auto_class_weights: str | None = "Balanced"
     # Performance knobs
     thread_count: int = -1  # -1 = all cores
     task_type: str = "CPU"  # "CPU" or "GPU"

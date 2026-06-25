@@ -15,6 +15,19 @@ Interactive OpenAPI:
 - Swagger UI: `GET /docs`
 - OpenAPI JSON: `GET /openapi.json`
 
+### Authentication
+
+Expensive endpoints (`/v1/predict`, `/v1/gap-info`) can be protected with a shared
+API key. Set `MODEL_TECH_API_KEY` and send it as the `X-API-Key` header:
+
+```bash
+curl -H "X-API-Key: $MODEL_TECH_API_KEY" "http://localhost:8000/v1/predict?symbol=BTCUSDT"
+```
+
+- If `MODEL_TECH_API_KEY` is unset/empty, authentication is **disabled** (local/dev default).
+- `/v1/health` and job-status endpoints stay open (monitoring/polling friendly).
+- Missing/invalid key on a protected endpoint → `401 Unauthorized`.
+
 ### Endpoints
 
 #### `GET /v1/health`
@@ -39,7 +52,10 @@ Behavior:
 
 Response fields:
 
-- `symbol`, `as_of`, `signal`, `confidence`, `probs`
+- `symbol`, `as_of`, `signal`, `probs`
+- `confidence`: probability of the **emitted** class (after the `min_conf` rule)
+- `max_prob`: raw top class probability **before** the rule (so a forced HOLD's low confidence is explainable)
+- `forced_hold`: `true` when the model's argmax was not HOLD but `min_conf` downgraded it to HOLD
 - `model_id_used`: `"global"` or `<SYMBOL>`
 - `job_id`: present if a training job was scheduled
 

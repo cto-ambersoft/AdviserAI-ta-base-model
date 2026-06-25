@@ -1,5 +1,23 @@
 from __future__ import annotations
 
+import re
+
+
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,30}$")
+
+
+def validate_symbol(symbol: str) -> str:
+    """
+    Validate a symbol against ``^[A-Z0-9]{2,30}$`` and return its canonical (upper)
+    form. Defense-in-depth: this is the last gate before a symbol becomes a
+    filesystem path (data/<SYMBOL>_4h.parquet, artifacts/models/<SYMBOL>/...), so
+    it blocks path-traversal and odd characters even if a caller skips normalize_symbol.
+    """
+    s = (symbol or "").strip().upper()
+    if not _SYMBOL_RE.match(s):
+        raise ValueError(f"Invalid symbol: {symbol!r} (expected ^[A-Z0-9]{{2,30}}$)")
+    return s
+
 
 _KNOWN_QUOTES: tuple[str, ...] = (
     "USDT",

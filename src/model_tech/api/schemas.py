@@ -15,8 +15,10 @@ class PredictResponse(BaseModel):
     symbol: str
     as_of: str
     signal: str
-    confidence: float
+    confidence: float = Field(..., description="probability of the emitted class")
     probs: dict[str, float]
+    max_prob: float = Field(..., description="raw top class probability before the min_conf rule")
+    forced_hold: bool = Field(False, description="True if argmax was not HOLD but min_conf downgraded it")
 
     model_id_used: str = Field(..., description="global or SYMBOL")
     job_id: Optional[str] = Field(None, description="Training job id, if scheduled")

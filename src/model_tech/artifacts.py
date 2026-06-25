@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from model_tech.config import Paths
+from model_tech.data.symbols import validate_symbol
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,7 @@ class ArtifactPaths:
     labeling_path: Path
     inference_path: Path
     metrics_path: Path
+    calibration_path: Path
 
 
 def artifact_paths(paths: Paths, *, model_id: str | None = None) -> ArtifactPaths:
@@ -29,13 +31,14 @@ def artifact_paths(paths: Paths, *, model_id: str | None = None) -> ArtifactPath
     if model_id is None or str(model_id).strip() in {"", "global"}:
         d = paths.artifacts_dir
     else:
-        d = paths.artifacts_dir / "models" / str(model_id).strip().upper()
+        d = paths.artifacts_dir / "models" / validate_symbol(str(model_id))
     return ArtifactPaths(
         model_path=d / "model.cbm",
         feature_schema_path=d / "feature_schema.json",
         labeling_path=d / "labeling.json",
         inference_path=d / "inference.json",
         metrics_path=d / "metrics.json",
+        calibration_path=d / "calibration.json",
     )
 
 

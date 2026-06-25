@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
+from model_tech.api.auth import require_api_key
 from model_tech.api.jobs import TrainJobQueue
 from model_tech.api.schemas import GapInfoResponse, HealthResponse, JobStatusResponse, PredictResponse
 from model_tech.artifacts import artifacts_ready
@@ -46,6 +47,10 @@ def get_artifacts_store(request: Request) -> ArtifactsStore:
 
 def get_job_queue(request: Request) -> TrainJobQueue:
     return _state(request).job_queue
+
+
+def get_gap_cache(request: Request):
+    return _state(request).gap_cache
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -92,15 +97,18 @@ def train_status(symbol: str, q: TrainJobQueue = Depends(get_job_queue)) -> JobS
     )
 
 
-@router.get("/gap-info", response_model=GapInfoResponse)
-async def gap_info() -> GapInfoResponse:
+@router.get("/gap-info", response_model=GapInfoResponse, dependencies=[Depends(require_api_key)])
+async def gap_info(gap_cache=Depends(get_gap_cache)) -> GapInfoResponse:
     """
     Independent endpoint: loads CME BTC history, BTC.D/USDT.D dominance,
     computes market regime and detects CME gaps (ported from gap_detector_v2.py).
+
+    The payload is cached (TTLCache) because the upstream TradingView fetch is
+    heavy and rate-limited; concurrent callers are single-flighted.
     """
     try:
         payload = await run_in_threadpool(
-            build_gap_info,
+            lambda: gap_cache.get_or_compute("gap-info", build_gap_info),
         )
         return payload  # FastAPI will validate/serialize via response_model
     except GapInfoDependencyError as e:
@@ -111,7 +119,7 @@ async def gap_info() -> GapInfoResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/predict", response_model=PredictResponse)
+@router.get("/predict", response_model=PredictResponse, dependencies=[Depends(require_api_key)])
 def predict(
     symbol: str,
     refresh: bool = True,
@@ -195,6 +203,8 @@ def predict(
         signal=str(pred.signal.value),
         confidence=float(pred.confidence),
         probs=pred.probs,
+        max_prob=float(pred.max_prob),
+        forced_hold=bool(pred.forced_hold),
         model_id_used=(model_id_used or "global"),
         job_id=job_id,
     )
